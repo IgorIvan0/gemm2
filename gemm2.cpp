@@ -7,31 +7,31 @@ static __declspec(align(64)) int mask[32] = {-1, -1, -1, -1, -1, -1, -1, -1, -1,
                                     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0};
 
 // "kernel" 6x16
-static void micro_6x16(	// полностью заполняет фрагмент С (больше к нему не возвращаемся)
-	int K,		// число точек в строке A = число строк в B
-	const float *A,	// 0я строка (из 6)
-	int lda,	// межстрочный интервал (lda >= K для А и 1 для A^T)
-	int step,	// 1 для А и lda для A^T
-    const float *B,	// колонка B шириной 16 (ре-упорядочено во временный буфер)
-	int ldb,	// между 16-ками в В (=16 если В предварительно упаковали для скорости)
-	float *C,	// куды скрадывать результат, поле 6х16 в большой матрице
-	int ldc,	// между строками C
-	int cy,		// строк во фрагменте (<= 6)
-	int cx		// ширина фрагмента (<= 16)
+static void micro_6x16(	// completes 6x16 submatrix of C
+	int K,		// cols in A = rows in B
+	const float *A,	// 0-th row (from 6)
+	int lda,	// stride of A (lda >= K for А and 1 for A^T)
+	int step,	// 1 for А and lda for A^T
+    const float *B,	// 0-th column (from 16)
+	int ldb,	// stride of B (=16 if B is pre-packed)
+	float *C,	// out -> 6х16 rect in a big matrix
+	int ldc,	// stride of C
+	int cy,		// rows for output (<= 6)
+	int cx		// cols for output (<= 16)
 ) {
     __m256 c00 = _mm256_setzero_ps();
     __m256 c10 = _mm256_setzero_ps();
     __m256 c20 = _mm256_setzero_ps();
     __m256 c30 = _mm256_setzero_ps();
     __m256 c40 = _mm256_setzero_ps();
-    __m256 c50 = _mm256_setzero_ps();	// 6 регистров под 1ю 8ку
+    __m256 c50 = _mm256_setzero_ps();	// 1st 6x8 half
     __m256 c01 = _mm256_setzero_ps();
     __m256 c11 = _mm256_setzero_ps();
     __m256 c21 = _mm256_setzero_ps();
     __m256 c31 = _mm256_setzero_ps();
     __m256 c41 = _mm256_setzero_ps();
-    __m256 c51 = _mm256_setzero_ps();	// +6 под вторые 8
-    __m256 b0, b1, a0, a1;			// +4 регистра под источники (их перемножаем)
+    __m256 c51 = _mm256_setzero_ps();	// 2nd 6x8 half
+    __m256 b0, b1, a0, a1;			// sources to multiply
 	//
 	const int lda2 = 2*lda, lda3 = 3*lda, lda4 = 4*lda, lda5 = 5*lda;
     for (int k = 0; k < K; k++) {
@@ -57,7 +57,7 @@ static void micro_6x16(	// полностью заполняет фрагмент С (больше к нему не возв
         c51 = _mm256_fmadd_ps(a1, b1, c51);
         B += ldb; A += step;
     }
-	// 12 регистров -> + память (C)
+	// add and store result
     _mm256_storeu_ps(C + 0, _mm256_add_ps(c00, _mm256_loadu_ps(C + 0)));
     _mm256_storeu_ps(C + 8, _mm256_add_ps(c01, _mm256_loadu_ps(C + 8)));
 	if (cy < 2) return;
@@ -97,7 +97,7 @@ static void zero_C( int M, int N, float *C, int ldc ) {
 	}
 }
 
-// D[16,K] := S[n,K] S не повернуто (X вперед)
+// D[16,K] := S[n,K] S not transponed (X first)
 static void reorder_b( int K, const float *S, int ldb, float *D, int n ) {
 	if (n < 16) {
 		__m256i mx0 = _mm256_maskz_load_epi32( 0xff, &mask[16 - n] );
@@ -114,9 +114,9 @@ static void reorder_b( int K, const float *S, int ldb, float *D, int n ) {
 	}
 }
 
-// B[wb,cx] := A[cy,cx], A повернуто (Y вперед)
+// B[wb,cx] := A[cy,cx], A transponed (Y first)
 static void transband( const float *A, int cx, int cy, float *B, int wb ) {
-	if (cy < wb)	// строк меньше ширины ряда В, будут пропуски, занулить их заранее
+	if (cy < wb)	// zerofill in advance to prevent gaps in B
 		memset( B, 0, cx*wb*sizeof(B[0]) );
 	for ( ; --cy >= 0; B++) {
 		float *b = B;
@@ -124,7 +124,7 @@ static void transband( const float *A, int cx, int cy, float *B, int wb ) {
 	}
 }
 
-// B := A[1:K,1:n] = полоса А шириной n <= wb (wb=6) из К строк
+// B := A[1:K,1:n] = vert. stripe of A (K rows, n cols, n <= wb (wb=6))
 static void transaT( const float *A, int K, int lda, float *B, int wb, int n ) {
 	if (n < wb) {
 		__m256i mx = _mm256_maskz_load_epi32( 0xff, &mask[16 - n] );
@@ -137,31 +137,31 @@ static void transaT( const float *A, int K, int lda, float *B, int wb, int n ) {
 		}
 }
 
-static void gemm2j(		// C = A*B
-	int tab,	// 3 бита, 1: А повернута (A^T), 2: В^T, 4: занулить C
-	int M,		// строк С = строк А (или столбов А если A^T)
-	int N,		// столбов С = столбов В (или строк В если B^T)
-	int K,		// столбов А (или A^T) = строк В (или B^T)
+static void gemm2j(		// C = A*B (single thread)
+	int tab,	// see TAB_* bits
+	int M,		// rows in С = rows in А (or cols in A if A^T)
+	int N,		// cols in С = cols in В (or rows in В if B^T)
+	int K,		// cols in А (or A^T) = rows in В (or B^T)
 	const float *A,
-	int lda,	// длина строки А для tab&1 (=M if !MT)
+	int lda,	// stride of А if A^T (=M if !TAB_PARALLEL)
 	const float *B, 
-	int ldb,	// длина строки B (>= N)
+	int ldb,	// stride of B (>= N)
 	float *C,
-	int ldc		// длина строки C (>= N)
+	int ldc		// stride of C (>= N)
 ) {
 	float *buf = (float*)_mm_malloc( (16*K + 16)*sizeof(buf[0]), 64 );
 	int i, j, ij, n, m;
-	int di = tab & 1? 1 : K, da = tab & 1? 6 : 1;
+	int di = tab & TAB_TRANSP_A? 1 : K, da = tab & TAB_TRANSP_A? 6 : 1;
 	//
     for (j = 0; j < N; j += 16) {
 		n = _min(16, N - j);
-		if (tab & 2)	// B^T
+		if (tab & TAB_TRANSP_B)	// B^T
 	        transband( B + j*K, K, n, buf, 16 );
 		else
 			reorder_b( K, B + j, ldb, buf, n );
         for (i = 0, ij = j; i < M; i += 6, ij += 6*ldc) {
 			m = _min(6, M - i);
-			if (!(tab & 4))
+			if (!(tab & TAB_ZEROED_C))
 				zero_C( m, n, C + ij, ldc );	// C_ij = C[i:+6, j:j+16] := 0
 //			micro_6x16( K, A + i*K, di, da, buf, 16, C + ij, ldc, m, n );	// C_ij += A[i, :]*B[:, j:+16]
 			micro_6x16( K, A + i*K, 1, 6, buf, 16, C + ij, ldc, m, n );	// C_ij += A[i, :]*B[:, j:+16]
@@ -179,12 +179,12 @@ static int rob_gemm( void *host, int j ) {
 	JOB_GEMM *jg = (JOB_GEMM*)host;
 	int p = t_nya(), M = jg->M, N = jg->N, K = jg->K, T = jg->tab;
 #if 0
-	int m = (((M - 1)/6)/p + 1)*6;	// часть М для 1 нити
+	int m = (((M - 1)/6)/p + 1)*6;
 	int i1 = j*m, i2 = __min( M, i1 + m ), di = T & 1? 1 : K;
 	if (i2 > i1)
 		gemm2j( T, i2 - i1, N, K, jg->A + i1*di, M, jg->B, N, jg->C + i1*N, N );
 #else
-	int n = (((N - 1)/16)/p + 1)*16;	// часть N для 1 нити
+	int n = (((N - 1)/16)/p + 1)*16;	// part of N for 1 thread
 	int i1 = j*n, i2 = __min( N, i1 + n ), di = T & 2? K : 1;
 	if (i2 > i1)
 		gemm2j( T, M, i2 - i1, K, jg->A, M, jg->B + i1*di, N, jg->C + i1, N );
@@ -199,12 +199,12 @@ void gemm2( int tab, int M, int N, int K, const float *A, const float *B, float 
 	float *abu = (float*)_mm_malloc( (K*(M + 5))*sizeof(abu[0]), 64 );
 	for (int i = 0; i < M; i += 6) {
 		int m = _min(6, M - i);
-		if (tab & 1)
+		if (tab & TAB_TRANSP_A)
 			transaT( A + i, K, M, abu + i*K, 6, m );
 		else
 			transband( A + i*K, K, m, abu + i*K, 6 );
 	}
-	if (tab & 8) {
+	if (tab & TAB_PARALLEL) {
 		JOB_GEMM jg = {tab, M, N, K, abu, B, C};
 		t_run( rob_gemm, &jg );
 	} else

@@ -28,6 +28,9 @@
     <ClInclude Include="troika.h" />
     <ClInclude Include="ugemm.h" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>

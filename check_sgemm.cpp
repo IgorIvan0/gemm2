@@ -22,6 +22,7 @@ int main() {
 	int M = 1000, N = 1200, K = 1150;
 	int i, na = M*K, nb = K*N, nc = M*N;
 	float alpha = 1, beta  = 0;
+	int tab = 0;	// try TAB_PARALLEL
 
 	float *a = (float*)malloc_a( (na + nb)*sizeof(a[0]), 32 ), *b = a + na;
 	for (i = na + nb; --i >= 0; ) { a[i] = (float)rand()/RAND_MAX; }
@@ -42,13 +43,13 @@ int main() {
 	for (i = NITER; --i >= 0; ) { sgemm_sse(  'R', 'T', 'N', M, N, K, alpha, a,M, b,N, beta, s + 2*nc,N  ); }
 	uint64_t ts3 = __rdtsc() - t0; t0 += ts3;
 
-	for (i = NITER; --i >= 0; ) { gemm2( 0, M, N, K, a, b, x ); }
+	for (i = NITER; --i >= 0; ) { gemm2( tab, M, N, K, a, b, x ); }
 	uint64_t t1 = __rdtsc() - t0; t0 += t1;
 
-	for (i = NITER; --i >= 0; ) { gemm2( 2, M, N, K, a, b, x + nc ); }
+	for (i = NITER; --i >= 0; ) { gemm2( TAB_TRANSP_B|tab, M, N, K, a, b, x + nc ); }
 	uint64_t t2 = __rdtsc() - t0; t0 += t2;
 
-	for (i = NITER; --i >= 0; ) { gemm2( 1, M, N, K, a, b, x + 2*nc ); }
+	for (i = NITER; --i >= 0; ) { gemm2( TAB_TRANSP_A|tab, M, N, K, a, b, x + 2*nc ); }
 	uint64_t t3 = __rdtsc() - t0; t0 += t2;
 
 	float e1 = maxdif( x, c, nc ), e2 = maxdif( x + nc, c + nc, nc ), e3 = maxdif( x + 2*nc, c + 2*nc, nc );
